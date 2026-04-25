@@ -147,7 +147,16 @@ namespace UnderwearBodyMask
         {
             RequestRefresh(__instance);
         }
-
+        public static void OnComponentReloadFinished(Component __instance)
+        {
+            var chaCtrl = __instance != null ? __instance.GetComponent<ChaControl>() : null;
+            var applier = GetOrCreateApplier(chaCtrl);
+            if (applier != null)
+            {
+                applier._customMaskApplied = false;  // Force reapplication after uncensor loads
+                applier.RequestRefresh();
+            }
+        }
         public static void OnReloadAsync(ChaControl __instance, ref IEnumerator __result)
         {
             var original = __result;
@@ -167,7 +176,13 @@ namespace UnderwearBodyMask
             var original = __result;
             __result = RunAfterCoroutine(original, () =>
             {
-                RequestRefresh(__instance != null ? __instance.GetComponent<ChaControl>() : null);
+                var chaCtrl = __instance != null ? __instance.GetComponent<ChaControl>() : null;
+                var applier = GetOrCreateApplier(chaCtrl);
+                if (applier != null)
+                {
+                    applier._customMaskApplied = false;  // Force reapplication after uncensor loads
+                }
+                RequestRefresh(chaCtrl);
             });
         }
 
@@ -201,7 +216,8 @@ namespace UnderwearBodyMask
         private const int MaxRefreshFrames = 180;
 
         public ChaControl ChaCtrl;
-
+        public bool _customMaskApplied;
+        private ChaControl _lastChaCtrl;
         private Texture2D _maskTex;
         private Texture2D _outerTopMaskTex;
         private Texture2D _outerBottomMaskTex;
@@ -220,7 +236,6 @@ namespace UnderwearBodyMask
         private Texture _fallbackBraAlphaMask;
         private Texture _fallbackInnerBAlphaMask;
         private Texture _fallbackInnerTBAlphaMask;
-        private bool _customMaskApplied;
 
         public void RequestRefresh()
         {
@@ -238,6 +253,11 @@ namespace UnderwearBodyMask
 
         private void Update()
         {
+            if (_lastChaCtrl != ChaCtrl)
+            {
+                _lastChaCtrl = ChaCtrl;
+                ClearCache();
+            }
             bool changed = false;
 
             if (ChaCtrl?.nowCoordinate?.clothes?.parts != null)
@@ -426,6 +446,8 @@ namespace UnderwearBodyMask
 
         private void RefreshMaskState()
         {
+            _cachedMaskKey = null;
+            _cachedMaskTex = null;
             _innerTopMaskTex = GetMaskFromSlot(2);
             _innerBottomMaskTex = GetMaskFromSlot(3);
             _outerTopMaskTex = GetMaskFromSlot(0);
@@ -447,6 +469,13 @@ namespace UnderwearBodyMask
 
         private Texture2D GetPreferredMask()
             => _innerTopMaskTex ?? _innerBottomMaskTex ?? _outerTopMaskTex ?? _outerBottomMaskTex;
+
+        private void ClearCache()
+        {
+            _cachedMaskKey = null;
+            _cachedMaskTex = null;
+            BodyMaskPlugin.LogInfo("[BodyMask] Cache cleared for new character");
+        }
 
         private void ApplyMaskToBody(Texture maskTex)
         {
@@ -494,6 +523,7 @@ namespace UnderwearBodyMask
                 ChaCtrl.updateAlphaMask = true;
                 ChaCtrl.updateAlphaMask2 = true;
                 RefreshGameAlphaMask();
+                _customMaskApplied = false;
             }
 
             Texture resolvedBodyMask = ChaCtrl.texBodyAlphaMask != null ? ChaCtrl.texBodyAlphaMask : maskTex;
