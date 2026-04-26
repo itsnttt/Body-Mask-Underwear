@@ -223,6 +223,8 @@ namespace UnderwearBodyMask
         private Texture2D _outerBottomMaskTex;
         private Texture2D _innerTopMaskTex;
         private Texture2D _innerBottomMaskTex;
+        private Texture2D _innerTopMaskTexHalf;    // half-state mask for bra slot (clothesState==1)
+        private Texture2D _innerBottomMaskTexHalf; // half-state mask for panties slot (clothesState==1)
         private bool _refreshPending;
         private int _refreshTicket;
         private Coroutine _refreshCoroutine;
@@ -424,7 +426,8 @@ namespace UnderwearBodyMask
                 string lowerVal = val.ToLowerInvariant();
                 if (val.Contains("_bm.unity3d") || val.Contains("-bm.unity3d"))
                     bundlePath = val;
-                else if (val == "AlphaMask" || lowerVal.Contains("bodymask") || lowerVal.Contains("alphamask"))
+                else if ((val == "AlphaMask" || lowerVal.Contains("bodymask") || lowerVal.Contains("alphamask"))
+                         && !lowerVal.Contains("half")) // exclude half-state textures from main mask
                     texName = val;
             }
 
@@ -444,6 +447,55 @@ namespace UnderwearBodyMask
             return mask;
         }
 
+        // Loads the half-state mask texture for a slot.
+        // Scans dictInfo for values containing "half" + ("alphamask" or "bodymask").
+        private Texture2D GetHalfMaskFromSlot(int kind)
+        {
+            var parts = ChaCtrl?.nowCoordinate?.clothes?.parts;
+            if (parts == null || kind >= parts.Length || ChaCtrl.lstCtrl == null) return null;
+
+            var clothesInfo = parts[kind];
+            if (clothesInfo == null || clothesInfo.id == 0) return null;
+
+            ListInfoBase listInfo = null;
+            foreach (ChaListDefine.CategoryNo cat in Enum.GetValues(typeof(ChaListDefine.CategoryNo)))
+            {
+                var tempInfo = ChaCtrl.lstCtrl.GetListInfo(cat, clothesInfo.id);
+                if (tempInfo == null) continue;
+                if (clothesInfo.id > 100000) { listInfo = tempInfo; break; }
+                string catName = cat.ToString().ToLowerInvariant();
+                bool match = false;
+                switch (kind)
+                {
+                    case 0: match = catName.Contains("top") || catName.Contains("outer") || catName.Contains("swim") || catName.Contains("fin"); break;
+                    case 1: match = catName.Contains("bot") || catName.Contains("skirt") || catName.Contains("pant"); break;
+                    case 2: match = catName.Contains("bra") || catName.Contains("inner") || catName.Contains("up"); break;
+                    case 3: match = catName.Contains("short") || catName.Contains("bot") || catName.Contains("inner") || catName.Contains("low"); break;
+                }
+                if (match) { listInfo = tempInfo; break; }
+            }
+
+            if (listInfo == null) return null;
+
+            string bundlePath = null;
+            string texHalfName = null;
+
+            foreach (var kvp in listInfo.dictInfo)
+            {
+                string val = kvp.Value;
+                if (string.IsNullOrEmpty(val)) continue;
+                string lowerVal = val.ToLowerInvariant();
+                if (val.Contains("_bm.unity3d") || val.Contains("-bm.unity3d"))
+                    bundlePath = val;
+                else if (lowerVal.Contains("half") && (lowerVal.Contains("alphamask") || lowerVal.Contains("bodymask")))
+                    texHalfName = val;
+            }
+
+            if (string.IsNullOrEmpty(bundlePath) || string.IsNullOrEmpty(texHalfName)) return null;
+
+            return CommonLib.LoadAsset<Texture2D>(bundlePath, texHalfName, false, "");
+        }
+
         private void RefreshMaskState()
         {
             _cachedMaskKey = null;
@@ -452,6 +504,9 @@ namespace UnderwearBodyMask
             _innerBottomMaskTex = GetMaskFromSlot(3);
             _outerTopMaskTex = GetMaskFromSlot(0);
             _outerBottomMaskTex = GetMaskFromSlot(1);
+            // Load half-state variants (applied when clothesState[slot] == 1)
+            _innerTopMaskTexHalf = GetHalfMaskFromSlot(2);
+            _innerBottomMaskTexHalf = GetHalfMaskFromSlot(3);
             _maskTex = GetPreferredMask();
         }
 
@@ -462,6 +517,8 @@ namespace UnderwearBodyMask
             _outerBottomMaskTex = null;
             _innerTopMaskTex = null;
             _innerBottomMaskTex = null;
+            _innerTopMaskTexHalf = null;
+            _innerBottomMaskTexHalf = null;
         }
 
         private bool HasCustomInnerMask()
@@ -485,8 +542,15 @@ namespace UnderwearBodyMask
                 CaptureFallbackAlphaMasks();
 
             bool slotMaskChanged = false;
-            Texture topMask = _innerTopMaskTex;
-            Texture bottomMask = _innerBottomMaskTex;
+
+            // Pick half or full mask based on clothes state.
+            // clothesState[2]=bra, clothesState[3]=panties. 0=on, 1=half, 2=off.
+            var state = ChaCtrl.fileStatus?.clothesState;
+            bool braHalf = state != null && state.Length > 2 && state[2] == 1;
+            bool pantHalf = state != null && state.Length > 3 && state[3] == 1;
+
+            Texture topMask = braHalf && _innerTopMaskTexHalf != null ? (Texture)_innerTopMaskTexHalf : _innerTopMaskTex;
+            Texture bottomMask = pantHalf && _innerBottomMaskTexHalf != null ? (Texture)_innerBottomMaskTexHalf : _innerBottomMaskTex;
 
             if (topMask != null && ChaCtrl.texBraAlphaMask != topMask)
             {
