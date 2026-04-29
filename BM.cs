@@ -45,6 +45,9 @@ namespace UnderwearBodyMask
                 TryPatch(harmony, bodyRefreshMethod, nameof(Hooks.OnRefresh), bodyRefreshMethod.Name);
             }
 
+            TryPatch(harmony, AccessTools.Method(typeof(ChaControl), "LoadAlphaMaskTexture", new[] { typeof(string), typeof(string), typeof(byte) }), nameof(Hooks.OnAlphaMaskTextureChange), "LoadAlphaMaskTexture");
+            TryPatch(harmony, AccessTools.Method(typeof(ChaControl), "ReleaseAlphaMaskTexture", new[] { typeof(byte) }), nameof(Hooks.OnAlphaMaskTextureChange), "ReleaseAlphaMaskTexture");
+
             TryPatchUncensorSelector(harmony);
 
             var initialize = typeof(ChaControl)
@@ -73,6 +76,8 @@ namespace UnderwearBodyMask
                 TryPatch(harmony, changeCoord, nameof(Hooks.OnRefresh), "ChangeNowCoordinate(3+)");
             else
                 LogWarning("[BodyMask] ChangeNowCoordinate(3+) not found.");
+
+            LogInfo("[BodyMask] Underwear Body Mask Plugin v1.1.4 loaded!");
         }
 
         private static void TryPatch(Harmony harmony, System.Reflection.MethodBase method, string hookName, string label)
@@ -147,13 +152,24 @@ namespace UnderwearBodyMask
         {
             RequestRefresh(__instance);
         }
+
+        public static void OnAlphaMaskTextureChange(ChaControl __instance)
+        {
+            var applier = GetOrCreateApplier(__instance);
+            if (applier != null)
+            {
+                applier.ForceReapply();
+                applier.RequestRefresh();
+            }
+        }
+
         public static void OnComponentReloadFinished(Component __instance)
         {
             var chaCtrl = __instance != null ? __instance.GetComponent<ChaControl>() : null;
             var applier = GetOrCreateApplier(chaCtrl);
             if (applier != null)
             {
-                applier._customMaskApplied = false;  // Force reapplication after uncensor loads
+                applier.ForceReapply();
                 applier.RequestRefresh();
             }
         }
@@ -180,7 +196,7 @@ namespace UnderwearBodyMask
                 var applier = GetOrCreateApplier(chaCtrl);
                 if (applier != null)
                 {
-                    applier._customMaskApplied = false;  // Force reapplication after uncensor loads
+                    applier.ForceReapply();
                 }
                 RequestRefresh(chaCtrl);
             });
@@ -223,8 +239,6 @@ namespace UnderwearBodyMask
         private Texture2D _outerBottomMaskTex;
         private Texture2D _innerTopMaskTex;
         private Texture2D _innerBottomMaskTex;
-        private Texture2D _innerTopMaskTexHalf;    // half-state mask for bra slot (clothesState==1)
-        private Texture2D _innerBottomMaskTexHalf; // half-state mask for panties slot (clothesState==1)
         private bool _refreshPending;
         private int _refreshTicket;
         private Coroutine _refreshCoroutine;
@@ -235,14 +249,16 @@ namespace UnderwearBodyMask
         private Texture2D _cachedMaskTex;
         private Texture _fallbackBodyAlphaMask;
         private Texture _fallbackBodyBAlphaMask;
-        private Texture _fallbackBraAlphaMask;
-        private Texture _fallbackInnerBAlphaMask;
-        private Texture _fallbackInnerTBAlphaMask;
 
         public void RequestRefresh()
         {
             _refreshPending = true;
             _refreshTicket++;
+        }
+
+        public void ForceReapply()
+        {
+            _customMaskApplied = false;
         }
 
         private void OnDisable()
@@ -447,55 +463,6 @@ namespace UnderwearBodyMask
             return mask;
         }
 
-        // Loads the half-state mask texture for a slot.
-        // Scans dictInfo for values containing "half" + ("alphamask" or "bodymask").
-        private Texture2D GetHalfMaskFromSlot(int kind)
-        {
-            var parts = ChaCtrl?.nowCoordinate?.clothes?.parts;
-            if (parts == null || kind >= parts.Length || ChaCtrl.lstCtrl == null) return null;
-
-            var clothesInfo = parts[kind];
-            if (clothesInfo == null || clothesInfo.id == 0) return null;
-
-            ListInfoBase listInfo = null;
-            foreach (ChaListDefine.CategoryNo cat in Enum.GetValues(typeof(ChaListDefine.CategoryNo)))
-            {
-                var tempInfo = ChaCtrl.lstCtrl.GetListInfo(cat, clothesInfo.id);
-                if (tempInfo == null) continue;
-                if (clothesInfo.id > 100000) { listInfo = tempInfo; break; }
-                string catName = cat.ToString().ToLowerInvariant();
-                bool match = false;
-                switch (kind)
-                {
-                    case 0: match = catName.Contains("top") || catName.Contains("outer") || catName.Contains("swim") || catName.Contains("fin"); break;
-                    case 1: match = catName.Contains("bot") || catName.Contains("skirt") || catName.Contains("pant"); break;
-                    case 2: match = catName.Contains("bra") || catName.Contains("inner") || catName.Contains("up"); break;
-                    case 3: match = catName.Contains("short") || catName.Contains("bot") || catName.Contains("inner") || catName.Contains("low"); break;
-                }
-                if (match) { listInfo = tempInfo; break; }
-            }
-
-            if (listInfo == null) return null;
-
-            string bundlePath = null;
-            string texHalfName = null;
-
-            foreach (var kvp in listInfo.dictInfo)
-            {
-                string val = kvp.Value;
-                if (string.IsNullOrEmpty(val)) continue;
-                string lowerVal = val.ToLowerInvariant();
-                if (val.Contains("_bm.unity3d") || val.Contains("-bm.unity3d"))
-                    bundlePath = val;
-                else if (lowerVal.Contains("half") && (lowerVal.Contains("alphamask") || lowerVal.Contains("bodymask")))
-                    texHalfName = val;
-            }
-
-            if (string.IsNullOrEmpty(bundlePath) || string.IsNullOrEmpty(texHalfName)) return null;
-
-            return CommonLib.LoadAsset<Texture2D>(bundlePath, texHalfName, false, "");
-        }
-
         private void RefreshMaskState()
         {
             _cachedMaskKey = null;
@@ -504,9 +471,6 @@ namespace UnderwearBodyMask
             _innerBottomMaskTex = GetMaskFromSlot(3);
             _outerTopMaskTex = GetMaskFromSlot(0);
             _outerBottomMaskTex = GetMaskFromSlot(1);
-            // Load half-state variants (applied when clothesState[slot] == 1)
-            _innerTopMaskTexHalf = GetHalfMaskFromSlot(2);
-            _innerBottomMaskTexHalf = GetHalfMaskFromSlot(3);
             _maskTex = GetPreferredMask();
         }
 
@@ -517,12 +481,13 @@ namespace UnderwearBodyMask
             _outerBottomMaskTex = null;
             _innerTopMaskTex = null;
             _innerBottomMaskTex = null;
-            _innerTopMaskTexHalf = null;
-            _innerBottomMaskTexHalf = null;
         }
 
         private bool HasCustomInnerMask()
-            => _innerTopMaskTex != null || _innerBottomMaskTex != null;
+            => _innerTopMaskTex != null
+            || _innerBottomMaskTex != null
+            || GetCurrentInnerTopSourceMask() != null
+            || GetCurrentInnerBottomSourceMask() != null;
 
         private Texture2D GetPreferredMask()
             => _innerTopMaskTex ?? _innerBottomMaskTex ?? _outerTopMaskTex ?? _outerBottomMaskTex;
@@ -534,6 +499,23 @@ namespace UnderwearBodyMask
             BodyMaskPlugin.LogInfo("[BodyMask] Cache cleared for new character");
         }
 
+        private Texture GetCurrentInnerTopSourceMask()
+        {
+            if (ChaCtrl == null) return null;
+
+            return ChaCtrl.texInnerTBAlphaMask
+                ?? ChaCtrl.texBraAlphaMask
+                ?? (Texture)_innerTopMaskTex;
+        }
+
+        private Texture GetCurrentInnerBottomSourceMask()
+        {
+            if (ChaCtrl == null) return null;
+
+            return ChaCtrl.texInnerBAlphaMask
+                ?? (Texture)_innerBottomMaskTex;
+        }
+
         private void ApplyMaskToBody(Texture maskTex)
         {
             if (ChaCtrl == null || maskTex == null) return;
@@ -542,37 +524,12 @@ namespace UnderwearBodyMask
                 CaptureFallbackAlphaMasks();
 
             bool slotMaskChanged = false;
-
-            // Pick half or full mask based on clothes state.
-            // clothesState[2]=bra, clothesState[3]=panties. 0=on, 1=half, 2=off.
-            var state = ChaCtrl.fileStatus?.clothesState;
-            bool braHalf = state != null && state.Length > 2 && state[2] == 1;
-            bool pantHalf = state != null && state.Length > 3 && state[3] == 1;
-
-            Texture topMask = braHalf && _innerTopMaskTexHalf != null ? (Texture)_innerTopMaskTexHalf : _innerTopMaskTex;
-            Texture bottomMask = pantHalf && _innerBottomMaskTexHalf != null ? (Texture)_innerBottomMaskTexHalf : _innerBottomMaskTex;
-
-            if (topMask != null && ChaCtrl.texBraAlphaMask != topMask)
-            {
-                ChaCtrl.texBraAlphaMask = topMask;
-                slotMaskChanged = true;
-            }
-
-            if (topMask != null && ChaCtrl.texInnerTBAlphaMask != topMask)
-            {
-                ChaCtrl.texInnerTBAlphaMask = topMask;
-                slotMaskChanged = true;
-            }
+            Texture topMask = GetCurrentInnerTopSourceMask();
+            Texture bottomMask = GetCurrentInnerBottomSourceMask();
 
             if (topMask != null && ChaCtrl.texBodyAlphaMask != topMask)
             {
                 ChaCtrl.texBodyAlphaMask = topMask;
-                slotMaskChanged = true;
-            }
-
-            if (bottomMask != null && ChaCtrl.texInnerBAlphaMask != bottomMask)
-            {
-                ChaCtrl.texInnerBAlphaMask = bottomMask;
                 slotMaskChanged = true;
             }
 
@@ -637,24 +594,6 @@ namespace UnderwearBodyMask
                 slotMaskChanged = true;
             }
 
-            if (ChaCtrl.texBraAlphaMask != _fallbackBraAlphaMask)
-            {
-                ChaCtrl.texBraAlphaMask = _fallbackBraAlphaMask;
-                slotMaskChanged = true;
-            }
-
-            if (ChaCtrl.texInnerBAlphaMask != _fallbackInnerBAlphaMask)
-            {
-                ChaCtrl.texInnerBAlphaMask = _fallbackInnerBAlphaMask;
-                slotMaskChanged = true;
-            }
-
-            if (ChaCtrl.texInnerTBAlphaMask != _fallbackInnerTBAlphaMask)
-            {
-                ChaCtrl.texInnerTBAlphaMask = _fallbackInnerTBAlphaMask;
-                slotMaskChanged = true;
-            }
-
             if (slotMaskChanged)
             {
                 ChaCtrl.updateAlphaMask = true;
@@ -695,9 +634,6 @@ namespace UnderwearBodyMask
         {
             _fallbackBodyAlphaMask = ChaCtrl.texBodyAlphaMask;
             _fallbackBodyBAlphaMask = ChaCtrl.texBodyBAlphaMask;
-            _fallbackBraAlphaMask = ChaCtrl.texBraAlphaMask;
-            _fallbackInnerBAlphaMask = ChaCtrl.texInnerBAlphaMask;
-            _fallbackInnerTBAlphaMask = ChaCtrl.texInnerTBAlphaMask;
         }
 
         private void RefreshGameAlphaMask()
